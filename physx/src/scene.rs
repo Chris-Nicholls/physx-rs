@@ -74,10 +74,15 @@ impl Scene {
             destroy_contact_callback(callback);
         }
 
+        if let Some(manager) = self.controller_manager.take() {
+            manager.release();
+        }
+
         // Release the scene object
         let mut scene = self.px_scene.write().unwrap();
         let scene = scene.take().expect("scene already released");
         let b: Box<UserData> = Box::from_raw((*scene).userData as *mut _);
+
         drop(b);
         PxScene_release_mut(scene);
     }
@@ -97,11 +102,9 @@ impl Scene {
         height: f32,
         radius: f32,
         step_offset: f32,
-    ) -> Result<Controllable, String> {
+    ) -> Result<Controller, String> {
         if self.controller_manager.is_none() {
-            self.controller_manager = Some(ControllerManager::new(
-                self.px_scene.write().unwrap().expect("accessing null ptr"),
-            ))
+            return Err("No controller manager on scene".to_string());
         }
 
         let mut c = CapsuleControllerDesc::new(height, radius, step_offset, material)?;
@@ -113,7 +116,7 @@ impl Scene {
             .create_controller(&mut c);
         c.release();
 
-        Ok(Controllable::new(Controller::new(controller.get_raw_mut())))
+        Ok(Controller::new(controller.get_raw_mut()))
     }
 
     pub fn add_actor(&mut self, mut actor: RigidStatic) -> BodyHandle {
@@ -464,6 +467,14 @@ impl Scene {
             PxScene_fetchResults_mut(scene.expect("accessing null ptr"), block, null_mut());
         }
     }
+
+    fn add_controller_manager(&mut self) {
+        if self.controller_manager.is_none() {
+            self.controller_manager = Some(ControllerManager::new(
+                self.px_scene.write().unwrap().expect("accessing null ptr"),
+            ))
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, BitFlags)]
@@ -497,6 +508,7 @@ pub struct SceneBuilder {
     pub(crate) simulation_filter_shader: Option<SimulationFilterShader>,
     pub(crate) simulation_threading: Option<SimulationThreadType>,
     pub(crate) broad_phase_type: BroadPhaseType,
+    pub(crate) use_controller_manager: bool,
 }
 
 impl Default for SceneBuilder {
@@ -506,6 +518,7 @@ impl Default for SceneBuilder {
             simulation_filter_shader: None,
             simulation_threading: None,
             broad_phase_type: BroadPhaseType::SweepAndPrune,
+            use_controller_manager: false,
         }
     }
 }
@@ -531,6 +544,11 @@ impl SceneBuilder {
         self
     }
 
+    pub fn use_controller_manager(&mut self, use_controller_manager: bool) -> &mut Self {
+        self.use_controller_manager = use_controller_manager;
+        self
+    }
+
     /// Set the number of threads to use for simulation
     ///
     /// Default: not set
@@ -548,7 +566,7 @@ impl SceneBuilder {
     }
 
     /// Build a new Scene from the provided parameters
-    pub(super) fn build(&self, physics: &mut Physics) -> PxSceneDesc {
+    pub(super) fn build(&self, physics: &mut Physics) -> Scene {
         unsafe {
             let tolerances = physics.get_tolerances_scale();
             let mut scene_desc = PxSceneDesc_new(tolerances);
@@ -574,7 +592,13 @@ impl SceneBuilder {
             } else {
                 scene_desc.filterShader = get_default_simulation_filter_shader();
             }
-            scene_desc
+            let px_physics = PxPhysics_createScene_mut(physics.get_raw_mut(), &scene_desc);
+            let mut scene = Scene::new(px_physics);
+
+            if self.use_controller_manager {
+                scene.add_controller_manager();
+            }
+            scene
         }
     }
 }
